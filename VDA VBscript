@@ -1,0 +1,619 @@
+'********************************************************************************************************************************************************************
+' Name		:	Citrix VirtualDeliveryAgent 2402.0.100.629
+' Version	:	2402 LTSR
+' Details	: 	We have added few checks in the existing install VB script as suggested by vendor as mentioned below
+' Line no 85-98 : To check if any other MSI install is running
+' We have used different exit code in place of 1603 for all type of error codes
+' Line no 558-560 : We have also used the MetaInstall Exit Code as Compliance Check
+'********************************************************************************************************************************************************************
+
+Option Explicit 
+Const HKEY_LOCAL_MACHINE 	  = &H80000002
+
+Dim objShell                 : Set objShell		 = CreateObject("wscript.shell")
+Dim objFSO   				 : Set objFSO		 = CreateObject("Scripting.FileSystemObject")
+Dim objRegistry			 	 : Set objRegistry 	 = GetObject("winmgmts:root\default:StdRegProv")
+Dim strChoice 				 : strChoice 		 = PopulateArgument(0)
+Dim strVendor 				 : strVendor 		 = "Citrix"
+Dim strProductName 			 : strProductName 	 = "VirtualDeliveryAgent"
+Dim strProductVersion 		 : strProductVersion = PopulateArgument(1)
+Dim strVDAVerCheck			 : strVDAVerCheck 	 = vbNullString
+Dim strAuditKeyPath			 : strAuditKeyPath 	 = "SYSTEM\BLK\Applications\MsiPackageAudit\" & strVendor & " " & strProductName & " " & strProductVersion
+Dim strLogPath				 : strLogPath 		 = objShell.ExpandEnvironmentStrings("%SystemDrive%\Support\Logs\" & strVendor & " " & strProductName & " " & strProductVersion)
+Dim strLogFile				 : strLogFile 		 = objShell.ExpandEnvironmentStrings("%SystemDrive%\Support\Logs\") & Replace(Ucase(WScript.ScriptName), ".VBS", ".LOG")
+Dim strVDACmdLine
+Dim strMetaExitCode
+Dim strRegisteredStateCheck
+Dim objWMIService            : Set objWMIService     = GetObject("winmgmts:\\.\root\cimv2")
+Dim boolCheck				 : boolCheck = False
+Dim strCurrDir 				 : strCurrDir 		 = Wscript.ScriptFullName
+Dim objFile    				 : Set objFile 		 = objFSO.GetFile(strCurrDir)
+strCurrDir = objFSO.GetParentFolderName(objFile)
+
+
+
+
+Call Output("---")
+Call Output("Script Starting")
+Call Output("---")
+
+
+
+Select Case RebootRequired(strAuditKeyPath)
+	Case True
+		' A reboot is required, quit
+		Call Output("A Reboot is already pending")
+		Call ExitScript(1641)
+		
+	Case False
+		'A reboot is not required, continue
+		Select Case LCase(Cstr(strChoice))
+			Case "install"
+				Call Output("Running Install routine")
+				Call InstallRoutine()
+			
+			Case "uninstall"
+				Call Output("Running UnInstall routine")
+				Call UninstallRoutine()
+				
+			Case Else
+				'some other argument was passed..
+				Call Output("Install or UnInstall not provided, quitting 1603")
+				Call ExitScript(1603)
+		End Select
+		
+End Select
+
+'Script should not get here, but if it does, handle the exit code as an error.
+Call Output("An unspecified error has occoured, quitting 1603")
+Call ExitScript(1603)
+
+
+
+Private Sub InstallRoutine()
+	'VC++ 2015to2022 Pre-requisites - Check & Install
+	Dim tmpRetcode
+	
+	strVDAVerCheck = SafeRegRead("HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Citrix Virtual Desktop Agent\DisplayVersion", "0")
+	Call Output("Comparing Local VDA Version : [" & strVDAVerCheck & "] with target VDA version [" & strProductVersion & "]")
+	
+	If CheckCompliance() = False Then 'Check if we are already compliant		
+		Call Output("VDA Check : Not compliant")
+		InstallPreReqs_VC2015to2022()
+		Call Output("Installed Dependencies")
+		Dim colServices, objWMIService, objService
+			Set objWMIService = GetObject("winmgmts:\\.\root\cimv2")
+			boolCheck = False
+			
+			Do While Not boolCheck
+				WScript.Sleep 20000
+				Set colServices = objWMIService.ExecQuery("Select * From Win32_Service Where Name='msiserver'")
+				For Each objService In colServices
+					If (objService.Started And Not objService.AcceptStop) Then
+						'WScript.Echo "Another .MSI is running."
+						Call Output("Another .MSI is running.")
+						'Call ExitScript(1618)
+					ElseIf ((objService.Started And objService.AcceptStop) Or Not objService.Started) Then
+						Call Output ("Ready to install Citrix VDA 2402 LTSR application.")
+						boolCheck = True
+					End If
+				Next
+			Loop
+
+		
+		
+		'Load the DDC info
+		Dim DdcList : DdcList = ReturnDDCInfo()				
+
+	            If Not DdcList = "NULL" Then
+                    'Ready with the DDC List, lets build the install command line
+			
+
+			Dim strOptions 				: strOptions 			  = GetRestart() & "/components vda /noresume /quiet /enable_remote_assistance /disableexperiencemetrics /enable_real_time_transport /enable_framehawk_port /enable_hdx_ports /enable_hdx_udp_ports"
+			Dim strAdditionalComponents : strAdditionalComponents = "/includeadditional ""Citrix Profile Management"",""Citrix Profile Management WMI Plug-in"",""Citrix Personalization for App-V - VDA"",""Citrix MCS IODriver"",""Citrix VDA Upgrade Agent"",""Citrix Rendezvous V2"",""Citrix Web Socket VDA Registration Tool"""
+			Dim strExcludeComponents    : strExcludeComponents    = "/exclude ""User Personalization layer"""
+			
+			strLogPath 	= strLogPath & "-INSTALL"
+			strVDACmdLine = """" & strCurrDir & "\x64\XenDesktop Setup\XenDesktopVdaSetup.exe"" /controllers """ & DdcList & """ " & "/logpath """ & strLogPath & """ " & strOptions & " " & strAdditionalComponents & " " & strExcludeComponents 
+			
+			'Install VDA
+			If objFSO.FileExists(strCurrDir & "\x64\XenDesktop Setup\XenDesktopVdaSetup.exe") Then
+				Call Output("Running Vendor Install")
+				Call WriteRunOnce()
+				tmpRetcode = objShell.Run(strVDACmdLine, 0, true)
+			Else
+				'File not found
+				Call Output("Installer file not found : [" & strCurrDir & "\x64\XenDesktop Setup\XenDesktopVdaSetup.exe" & "]")
+				Call ExitScript(1501)
+			End If
+				'Lets Set the ActionTime key
+				objRegistry.CreateKey HKEY_LOCAL_MACHINE, strAuditKeyPath
+				objRegistry.SetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "ActionTime", GenerateActionTime() 'add in an action time		
+			'Validate
+			If CheckCompliance() = True Then
+				'Success Detected, Lets create AuditKeys 
+				objRegistry.CreateKey HKEY_LOCAL_MACHINE, strAuditKeyPath
+				objRegistry.SetDWORDValue HKEY_LOCAL_MACHINE, "SYSTEM\CurrentControlSet\Control\Terminal Server\Wds\icawd", "MtuDiscovery", "1"
+				AddAuditKeys()
+				If RebootRequired(strAuditKeyPath) = False Then
+					objRegistry.DeleteValue HKEY_LOCAL_MACHINE, strAuditKeyPath,"ActionTime" 
+				End If
+				Call ExitScript(1641)
+			Else
+				'Pending Installation or Failure
+				Call Output("Installer Error : " & tmpRetcode)
+				Call ExitScript(tmpRetcode)
+			End If
+		Else
+			'DDC Info not provided.. fatal error
+			Call Output("DDC info not found, quitting with error 1502")
+			Call ExitScript(1502)
+		End If
+		
+	ElseIf CheckCompliance() = True Then
+	   'Came back after Reboot after successfull install, lets Delete SCCM Flag and Return 0
+	   
+	   Call Output("VDA Check : Compliant")
+		If RebootRequired(strAuditKeyPath) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE, strAuditKeyPath,"ActionTime" 
+		End If
+		Call Output("Product Installed, quitting with 0")
+		Call ExitScript(0)
+	Else
+		Call Output("VDA Check : Failed, quitting with error 1503")
+		Call ExitScript(1503)
+	End If	
+End Sub
+
+Private Sub UninstallRoutine()
+	Dim tmpRetCode
+	'Check VDA to be removed is detected
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Citrix Virtual Desktop Agent", "DisplayVersion", strVDAVerCheck
+	
+	If IsNull(strVDAVerCheck) = False Then
+	
+		'Lets Uninstall the intended VDA Product detected
+		If objFSO.FileExists(objShell.ExpandEnvironmentStrings("%ProgramFiles%\Citrix\XenDesktopVdaSetup\XenDesktopVdaSetup.exe")) = True Then
+			
+			strLogPath 	= strLogPath & "-REMOVAL"
+			strVDACmdLine = objShell.ExpandEnvironmentStrings("""%ProgramFiles%\Citrix\XenDesktopVdaSetup\XenDesktopVdaSetup.exe"" /remove /quiet " & GetRestart() & "/components vda /logpath """ & strLogPath & """")
+			
+			'Run Uninstall Command line
+			tmpRetCode = objShell.Run(strVDACmdLine, 0, true)
+			
+			'Lets Set the ActionTime key
+			objRegistry.CreateKey HKEY_LOCAL_MACHINE, strAuditKeyPath
+			objRegistry.SetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "ActionTime", GenerateActionTime() 'add in an action time 
+			
+			'Lets Validate to see if VDA is removed
+			objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Citrix Virtual Desktop Agent", "DisplayVersion", strVDAVerCheck
+			
+			If IsNull(strVDAVerCheck) = True Then
+				'Success::Citrix VDA is removed
+				RemoveAuditKeys()
+				If RebootRequired(strAuditKeyPath) = False Then
+					objRegistry.DeleteValue HKEY_LOCAL_MACHINE, strAuditKeyPath,"ActionTime" 
+					'objRegistry.DeleteValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "SCCMFlag"
+				End If
+				Call ExitScript(1641)
+			Else 
+				'Removal has failed at some stage
+				Call ExitScript(tmpRetCode)
+			End If		
+		End If
+	Else
+		'VDA Not Present on target device already and no reboot pending
+		'Now lets remove Audit Keys
+		RemoveAuditKeys()
+		objRegistry.DeleteValue HKEY_LOCAL_MACHINE, strAuditKeyPath,"ActionTime" 
+		Call ExitScript(0)
+	End If
+End Sub
+
+Private Sub AddAuditKeys()
+	Dim strPrevAuditCheck
+	'Remove Previous Package Audit Key - 7.24.1000.0
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 7.24.1000.0", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 7.24.1000.0",""
+		End If 
+	'Remove Previous Package Audit Key - 1912.0.1000.24525
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.1000.24525", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.1000.24525",""
+		End If 
+	'Remove Previous Package Audit Key - 1912.0.2000.2345
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.2000.2345", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.2000.2345",""
+		End If 
+	'Remove Previous Package Audit Key - 1912.0.4000.4227
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.4000.4227", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.4000.4227",""
+		End If 	
+	'Remove Previous Package Audit Key - 1912.0.4000.4227 R01
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.4000.4227 R01", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.4000.4227 R01",""
+		End If 	
+
+	'Remove Previous Package Audit Key - 1912.0.5000.5174
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.5000.5174", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.5000.5174",""
+		End If
+
+	'Remove Previous Package Audit Key - 1912.0.6000.6281
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.6000.6281", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.6000.6281",""
+		End If
+
+	'Remove Previous Package Audit Key - 1912.0.7000.7052
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.7000.7052", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.7000.7052",""
+		End If
+
+		'Remove Previous Package Audit Key - 1912.0.8000.8159
+	objRegistry.GetStringValue HKEY_LOCAL_MACHINE, "SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.8000.8159", "", strPrevAuditCheck
+		If IsNull(strPrevAuditCheck) = False Then
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE,"SYSTEM\BLK\Applications\MsiPackageAudit\Citrix VirtualDeliveryAgent 1912.0.8000.8159",""
+		End If
+	
+	Dim strCurrTime : strCurrTime = FormatDateTime(Now, vbShortDate) & " - " & formatdatetime(time,3)
+	'Add Keys
+	objRegistry.SetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "", "INSTALLED"
+	objRegistry.SetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "BlocksRemaining", "0"
+	objRegistry.SetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "InstalledBy", objShell.ExpandEnvironmentStrings("%USERNAME%")
+	objRegistry.SetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "InstalledFrom", strCurrDir
+	objRegistry.SetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "InstalledOn", strCurrTime
+	objRegistry.SetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "Version", strProductVersion
+End Sub
+
+Private Sub RemoveAuditKeys()
+   Dim strAuditStatusCheck
+   objRegistry.GetStringValue HKEY_LOCAL_MACHINE, strAuditKeyPath, "", strAuditStatusCheck
+   If IsNull(strAuditStatusCheck) = False Then
+		If LCase(strAuditStatusCheck) = "installed" Then
+			'Remove Audit Status Key 
+			objRegistry.DeleteValue HKEY_LOCAL_MACHINE, strAuditKeyPath,""
+		End If
+   End If 
+End Sub
+
+Private Sub InstallPreReqs_VC2015to2022() 
+Dim CheckVCx64, CheckVCx86, tmpCommand, Value, VerX64, VerX86
+
+Value=RegKeyExists("HKLM\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\")
+
+If (Value) Then
+'x64
+
+		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64", "Version", CheckVCx64)
+		'MsgBox(right(CheckVCx64, len(CheckVCx64)-1))
+		VerX64 = (right(CheckVCx64, len(CheckVCx64)-1))
+		'MsgBox(VerX64)
+		If VerX64 < "14.36.32532.00" Then
+			Call Output("VC++ 2015-2022 (x64) 14.36.32532.00 or higher is not installed and hence proceeding with install")
+			tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x64.exe"" /install /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.36.32532.00.log""" )
+			Call objShell.Run(tmpCommand, 0, true)
+		Else
+		'MsgBox("VC++ 2015-2022 (x64) 14.16.27012.06 or higher is already installed and hence skipping the install")
+			Call Output("VC++ 2015-2022 (x64) 14.36.32532.00 or higher is already installed and hence repairing the VC++ Install")
+			tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x64.exe"" /repair /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.36.32532.00-Repair.log""" )
+			Call objShell.Run(tmpCommand, 0, true)
+		End If
+		'Validate
+		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64", "Version", CheckVCx64)
+		VerX64 = (right(CheckVCx64, len(CheckVCx64)-1))
+		If VerX64 < "14.36.32532.00" Then
+			Call Output("VC++ 2015-2022 (x64) 14.36.32532.00 or higher is not detected, quitting with error 1504")
+			Call ExitScript(1504)
+		End If
+	'x86
+		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86", "Version", CheckVCx86)
+		'MsgBox(right(CheckVCx86, len(CheckVCx86)-1))
+		VerX86 = (right(CheckVCx86, len(CheckVCx86)-1))
+		'MsgBox(VerX86)
+		If VerX86 < "14.36.32532.00" Then
+			Call Output("VC++ 2015-2022 (x86) 14.36.32532.00 or higher is not installed and hence proceeding with install")
+			tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x86.exe"" /install /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x86) - 14.36.32532.00.log""" )
+			Call objShell.Run(tmpCommand, 0, true)
+		Else
+			'MsgBox("VC++ 2015-2022 (x86) 14.16.27012.06 or higher is already installed and hence skipping the install")
+			'VC++ 2015-2022 (x86) 14.16.27012.06 or higher is already installed and hence skipping the install
+			Call Output("VC++ 2015-2022 (x86) 14.36.32532.00 or higher is already installed and hence repairing the VC++ Install")
+			tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x86.exe"" /repair /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x86) - 14.36.32532.00-Repair.log""" )
+			Call objShell.Run(tmpCommand, 0, true)
+		End If
+		'Validate
+		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86", "Version", CheckVCx86)
+		VerX86 = (right(CheckVCx86, len(CheckVCx86)-1))
+		If VerX86 < "14.36.32532.00" Then
+			Call Output("VC++ 2015-2022 (x86) 14.36.32532.00 or higher is not detected, quitting with error 1504")
+			Call ExitScript(1504)
+		End If 
+Else
+	'X64
+		tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x64.exe"" /install /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.36.32532.00.log""" )
+		Call objShell.Run(tmpCommand, 0, true)
+		'Validate
+		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64", "Version", CheckVCx64)
+		VerX64 = (right(CheckVCx64, len(CheckVCx64)-1))
+		If VerX64 < "14.36.32532.00" Then
+			Call Output("VC++ 2015-2022 (x64) 14.36.32532.00 or higher is not detected, quitting with error 1504")
+			Call ExitScript(1504)
+		End If 
+	'x86
+		tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x86.exe"" /install /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x86) - 14.36.32532.00.log""" )
+		Call objShell.Run(tmpCommand, 0, true)
+		'Validate
+		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86", "Version", CheckVCx86)
+		VerX86 = (right(CheckVCx86, len(CheckVCx86)-1))
+		If VerX86 < "14.36.32532.00" Then
+			Call Output("VC++ 2015-2022 (x86) 14.36.32532.00 or higher is not detected, quitting with error 1504")
+			Call ExitScript(1504)
+		End If 
+End If	
+
+End Sub
+
+Private Sub ExitScript(pExitCode)
+	'Work out the exit code to pass back to the calling process
+	Call Output("Current Return Code: " & pExitCode)	
+	Call Output("---")
+	Call Output("Script Ending")
+	Call Output("---")
+	
+	Select Case pExitCode
+		Case 1641, 3010, 3, 4		
+			If Instr(Lcase(strCurrDir), "c:\windows\ccmcache") = 0  Then
+				'Not running from SCCM, pass a "rerun" exit code (success, but not finished)
+				WScript.Quit(-99)
+			Else
+				'Running from SCCM, do a reboot
+				WScript.Quit(1641)
+			End If
+		Case Else
+			WScript.Quit(pExitCode)
+	End Select
+End Sub
+
+Private Sub WriteRunOnce()
+	If Instr(Lcase(strCurrDir), "c:\windows\ccmcache") = 0  Then
+		objShell.Run "cmd /c echo [%date%] [%time%]>>C:\BLkBuild\DebugFiles\AlwaysRunScripts_once.flg",0,True
+	End If
+End Sub
+
+Private Function PopulateArgument(pArgNo)
+	On Error Resume Next
+	If Wscript.Arguments.Count >= pArgNo Then
+		PopulateArgument = Wscript.Arguments.Item(pArgNo)
+		Select Case PopulateArgument
+			Case vbNull, ""
+				Call Output("Argument [" & pArgNo & "] not valid")
+				Call ExitScript(1505)
+			Case Else
+				Call Output("Argument [" & pArgNo & "] valid [" & PopulateArgument & "]")
+		End Select
+	Else
+		Call Output("Argument [" & pArgNo & "] not valid")
+		Call ExitScript(1505)
+	End If
+	On Error GoTo 0 : Err.Clear
+End Function
+
+Private Sub Output(pMessage)
+	Call WriteToTextFile(strLogFile, pMessage)
+	If InStr(Ucase(WScript.FullName), "CSCRIPT") <> 0 Then
+		On Error Resume Next
+		WScript.Echo pMessage
+		On Error GoTo 0
+	End If	
+End Sub
+
+Function WriteToTextFile(strFile, strBuffer)
+	Const FORAPPENDING = 8
+	On Error Resume Next
+	Dim f : Set f = objFSO.OpenTextFile(strFile, FORAPPENDING, True)
+	
+	f.Writeline CStr(Now) & ": " & strBuffer
+	f.Close
+	Set f = Nothing
+	On Error GoTo 0
+End Function
+
+Private Function GetRestart()
+	GetRestart = ""
+	Select Case InBuildStaging()
+		Case True
+			Call Output("Build staging detected")
+			GetRestart = "/NOREBOOT "
+	End Select			
+End Function
+
+Public Function InBuildStaging()
+	Dim objSysInfo : Set objSysInfo = CreateObject("ADSystemInfo")
+	Dim OU_STAG    : OU_STAG 		= "OU=BUILDSTAGING,OU=WORKSTATIONS,DC=NA,DC=BLKINT,DC=COM"
+	InBuildStaging = Instr(UCase(objSysInfo.ComputerName), OU_STAG) <> 0	
+End Function
+
+Private Function ReturnDDCInfo()
+	Dim tCmd 
+	If  Instr(lcase(objShell.ExpandEnvironmentStrings("%COMPUTERNAME%")), "hkgmd008") <> 0 Then
+		tCmd = objShell.ExpandEnvironmentStrings("""" & strCurrDir & "\Blk-GetXml.exe"" /S:HKGMD008" & " /X:VDA.XML")
+	Else
+		tCmd = objShell.ExpandEnvironmentStrings("""" & strCurrDir & "\Blk-GetXml.exe"" /S:" & Left(objShell.ExpandEnvironmentStrings("%COMPUTERNAME%"),3) & " /X:VDA.XML")
+	End If 
+	Call objShell.Run(tCmd, 0, True)
+	ReturnDDCInfo = SafeRegRead("HKLM\SYSTEM\BLK\Scripts\VDA.XML", "NULL")
+End Function
+
+Private Function RebootRequired(strRegPath)
+
+	'Function to determine if a reboot is required.
+	'True = Reboot required
+	'False = Reboot not required
+	
+	Dim ActTime : ActTime = SafeRegRead("HKLM\" & strRegPath & "\ActionTime", "NOT-PRESENT")
+	
+	Select Case ActTime
+		Case "NOT-PRESENT"
+			'there is no pending boot as we have nothing to check against.
+			RebootRequired = False
+		Case Else
+			Dim BootTime : BootTime = CalculateLastBoot()
+			ActTime = ConvStrtoDt(ActTime)
+			Dim Diff : Diff = DateDiff("S", ActTime, BootTime)
+			If Diff =< 0 Then
+				RebootRequired = True
+			Else
+				RebootRequired = False
+			End If		
+	End Select
+End Function
+
+Private Function CalculateLastBoot()
+ 	'Function to return the last boot time of the machine
+ 	Const wbemFlagReturnImmediately = &h10
+ 	Const wbemFlagForwardOnly 		= &h20
+	Dim prp :	prp = ""
+	Dim val	:	val = ""
+	
+	On Error Resume Next
+    Dim objWMI	: Set objWMI = GetObject("winmgmts:")
+    Dim col		: Set col = objWMI.ExecQuery("Select * from Win32_OperatingSystem", "WQL", _
+    										wbemFlagReturnImmediately + wbemFlagForwardOnly)
+	
+	Dim obj, tmpStr
+	For Each obj in col
+		tmpStr = obj.LastBootUpTime
+	Next
+	
+	CalculateLastBoot = ConvStrtoDt(tmpStr)
+    On Error GoTo 0 : Err.Clear
+End Function
+
+Private Function ConvStrtoDt(pStr)
+	'Convert string to a standard format
+	Dim obj, tmpYr,tmpMn, tmpDy, tmpHr, tmpMi, tmpSe
+	tmpYr = Left(pStr,4)
+	tmpMn = Mid(pStr,5,2)
+	tmpDy = Mid(pStr,7,2)
+	tmpHr = Mid(pStr,9,2)
+	tmpMi = Mid(pStr,11,2)
+	tmpSe = Mid(pStr,13,2)
+	ConvStrtoDt = tmpDy & "/" & tmpMn & "/" & tmpYr & " " & tmpHr & ":" & tmpMi & ":" & tmpSe
+End Function
+
+Private Function GenerateActionTime()
+	'generate the action time in the correct format
+	Dim Curr : Curr = Now()
+	Dim tmpYr, tmpMn, tmpDy, tmpHr, tmpMi, tmpSe
+	
+	tmpYr = Year(Curr)
+	tmpMn = Month(Curr)	 : If Len(tmpMn) = 1 Then tmpMn = "0" & tmpMn	
+	tmpDy = Day(Curr)	 : If Len(tmpDy) = 1 Then tmpDy = "0" & tmpDy
+	tmpHr = Hour(Curr)   : If Len(tmpHr) = 1 Then tmpHr = "0" & tmpHr
+	tmpMi = Minute(Curr) : If Len(tmpMi) = 1 Then tmpMi = "0" & tmpMi
+	tmpSe = Second(Curr) : If Len(tmpSe) = 1 Then tmpSe = "0" & tmpSe
+	
+	GenerateActionTime = tmpYr & tmpMn & tmpDy & tmpHr & tmpMi & tmpSe
+End Function
+
+Private Function SafeRegRead(valueToread, defval) 
+	Dim str : str = defval
+	SafeRegRead =  str
+	
+	On Error Resume Next
+	SafeRegRead = objShell.RegRead(valueToread)
+	On Error GoTo 0 : Err.Clear
+End Function
+
+Private Function CheckIfProductIsInstalled(pProdCode)
+	Dim objInstaller 	
+	Set objInstaller = CreateObject("WindowsInstaller.Installer")		
+	
+	On Error Resume Next
+	Dim Pcode : Pcode = objInstaller.ProductInfo(pProdCode, "VersionString")
+	'Call Output("Product code [" & pProdCode & "] Version : [" & Pcode & "]")		
+	If Err.Number = 0 Then 
+		CheckIfProductIsInstalled = True				
+	Else
+		CheckIfProductIsInstalled = False		
+	End If
+	
+	Set objInstaller = Nothing		
+	On Error GoTo 0 : Err.Clear
+End Function
+
+Private Function DDCListVerify()
+	Dim DDCsListFromGetXML : DDCsListFromGetXML = UCase(Replace(SafeRegRead("HKLM\SYSTEM\BLK\Scripts\VDA.XML", "NULL"),","," "))
+	Dim DDCsListAterInstall : DDCsListAterInstall = UCase(SafeRegRead("HKLM\SOFTWARE\Citrix\VirtualDesktopAgent\ListOfDDCs", "NULL"))
+	
+	If DDCsListFromGetXML = DDCsListAterInstall Then
+		DDCListVerify = True
+	Else
+		DDCListVerify = False
+	End If		
+End Function
+
+Private Function CheckCompliance()
+	strVDAVerCheck = SafeRegRead("HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Citrix Virtual Desktop Agent\DisplayVersion", "0")
+    strMetaExitCode =  SafeRegRead("HKLM\SOFTWARE\Citrix\MetaInstall\ExitCode", "0")
+	strRegisteredStateCheck =  SafeRegRead("HKLM\SOFTWARE\Citrix\VirtualDesktopAgent\State\Registered", "0")
+	
+	
+	Select Case True
+		Case strVDAVerCheck <> strProductVersion
+			Call Output("VDA Version and Target version do not match, not compliant")
+			CheckCompliance = False	
+
+		Case (strMetaExitCode <> 8 Or strMetaExitCode <> 0)
+			Call Output("MetaInstall Exit Code is not 8 or 0, not compliant")
+			CheckCompliance = False	
+				
+		'Case (strRegisteredStateCheck <> 2)
+			'Call Output("Registered State Registry is not 2, not compliant")
+			'CheckCompliance = False
+			
+		Case DDCListVerify() = False
+			Call Output("DDC key does not match, not compliant")
+			CheckCompliance = False				
+		
+		Case CheckIfProductIsInstalled("{FB34BE11-343D-46DA-82B4-2E689836DED9}") = False
+			Call Output("Product code not present, not compliant")
+			CheckCompliance = False		
+			
+		Case CheckIfProductIsInstalled("{39F86030-57D2-43A8-989E-333625EA17DA}") = False
+			'There is an alternate product code for this element in some areas, 
+			'so this if statement allows the alternate code to mark the app as compliant.
+			If CheckIfProductIsInstalled("{418d830e-bcff-45e5-9f87-443bb6498df0}") = True Then
+				Call Output("VDA 2402 LTSR Version, DDC InfoList and MetaInstallExitCode Checks passed, VDA compliant")
+				CheckCompliance = True			
+			Else
+				Call Output("Product code 2 not present, not compliant")
+				CheckCompliance = False
+			End If
+		Case Else
+			Call Output("VDA 2402 LTSR Version, Reistered State registry, DDC InfoList and MetaInstallExitCode Checks passed, VDA compliant")
+			CheckCompliance = True
+	End Select
+
+End Function
+
+Private Function RegKeyExists(Key)
+	Dim oShell, entry
+	On Error Resume Next
+	Err.Clear
+	Set oShell = CreateObject("WScript.Shell")
+	entry = oShell.RegRead(Key)
+	If Err.Number = 0 Then
+		RegKeyExists = True
+	Else
+		RegKeyExists = False
+	End If
+	On Error GoTo 0 : Err.Clear
+End Function
