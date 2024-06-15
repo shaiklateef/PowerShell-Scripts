@@ -290,8 +290,7 @@ Value=RegKeyExists("HKLM\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Run
 
 If (Value) Then
 'x64
-
-		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64", "Version", CheckVCx64)
+	Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64", "Version", CheckVCx64)
 		'MsgBox(right(CheckVCx64, len(CheckVCx64)-1))
 		VerX64 = (right(CheckVCx64, len(CheckVCx64)-1))
 		'MsgBox(VerX64)
@@ -299,11 +298,13 @@ If (Value) Then
 			Call Output("VC++ 2015-2022 (x64) 14.36.32532.00 or higher is not installed and hence proceeding with install")
 			tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x64.exe"" /install /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.36.32532.00.log""" )
 			Call objShell.Run(tmpCommand, 0, true)
-		Else
+		Else If VerX64 = "14.36.32532.00" Then
 		'MsgBox("VC++ 2015-2022 (x64) 14.16.27012.06 or higher is already installed and hence skipping the install")
-			Call Output("VC++ 2015-2022 (x64) 14.36.32532.00 or higher is already installed and hence repairing the VC++ Install")
+			Call Output("VC++ 2015-2022 (x64) 14.36.32532.00 is already installed and hence repairing the VC++ Install")
 			tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x64.exe"" /repair /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.36.32532.00-Repair.log""" )
 			Call objShell.Run(tmpCommand, 0, true)
+		Else
+		Call Output("VC++ 2015-2022 (x64) higher than 14.36.32532.00 is installed and hence proceeding with install")
 		End If
 		'Validate
 		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64", "Version", CheckVCx64)
@@ -321,12 +322,16 @@ If (Value) Then
 			Call Output("VC++ 2015-2022 (x86) 14.36.32532.00 or higher is not installed and hence proceeding with install")
 			tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x86.exe"" /install /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x86) - 14.36.32532.00.log""" )
 			Call objShell.Run(tmpCommand, 0, true)
-		Else
+		Else If VerX86 = "14.36.32532.00" Then
 			'MsgBox("VC++ 2015-2022 (x86) 14.16.27012.06 or higher is already installed and hence skipping the install")
 			'VC++ 2015-2022 (x86) 14.16.27012.06 or higher is already installed and hence skipping the install
-			Call Output("VC++ 2015-2022 (x86) 14.36.32532.00 or higher is already installed and hence repairing the VC++ Install")
+			Call Output("VC++ 2015-2022 (x86) 14.36.32532.00 is already installed and hence repairing the VC++ Install")
 			tmpCommand = objShell.ExpandEnvironmentStrings ("""" & strCurrDir & "\Support\VcRedist\VC_redist.x86.exe"" /repair /quiet /norestart /log ""%SystemDrive%\Support\Logs\Microsoft Visual C++ 2015-2022 Redistributable (x86) - 14.36.32532.00-Repair.log""" )
 			Call objShell.Run(tmpCommand, 0, true)
+		Else
+		
+		Call Output("VC++ 2015-2022 (x86) higher than 14.36.32532.00 is installed and hence proceeding with install")
+		
 		End If
 		'Validate
 		Call objRegistry.GetStringValue (HKEY_LOCAL_MACHINE, "SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86", "Version", CheckVCx86)
